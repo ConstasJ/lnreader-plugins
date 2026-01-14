@@ -1,8 +1,39 @@
 import { CheerioAPI, load as parseHTML } from 'cheerio';
-import { fetchText } from '@libs/fetch';
+import { FetchInit, fetchText as ft } from '@libs/fetch';
 import { FilterTypes, Filters } from '@libs/filterInputs';
 import { Plugin } from '@/types/plugin';
 import { NovelStatus } from '@libs/novelStatus';
+
+async function fetchText(url: string, init?: FetchInit) {
+  const actInit = (() => {
+    if (init?.headers) {
+      if (init.headers instanceof Headers) {
+        if (!init.headers.get('User-Agent')) {
+          init.headers.set(
+            'User-Agent',
+            'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+          );
+        }
+      } else {
+        init.headers = {
+          'User-Agent':
+            'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+          ...init.headers,
+        };
+      }
+    } else {
+      init = {
+        ...init,
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+        },
+      };
+    }
+    return init;
+  })();
+  return await ft(url, actInit);
+}
 
 class Linovelib implements Plugin.PluginBase {
   id = 'linovelib';
