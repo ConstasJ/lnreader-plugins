@@ -1,8 +1,20 @@
 import { CheerioAPI, load as parseHTML } from 'cheerio';
-import { FetchInit, fetchText as ft } from '@libs/fetch';
+import { fetchText as ft } from '@libs/fetch';
 import { FilterTypes, Filters } from '@libs/filterInputs';
 import { Plugin } from '@/types/plugin';
 import { NovelStatus } from '@libs/novelStatus';
+
+type FetchInit = {
+  headers?: Record<string, string | undefined> | Headers;
+  method?: string;
+  body?: FormData | string;
+  [x: string]:
+    | string
+    | Record<string, string | undefined>
+    | undefined
+    | FormData
+    | Headers;
+};
 
 async function fetchText(url: string, init?: FetchInit) {
   const actInit = (() => {
@@ -493,7 +505,7 @@ class Linovelib implements Plugin.PluginBase {
         const novelCover = pageCheerio(el)
           .find('div.book-cover > img')
           .attr('data-src');
-        const novelUrl = this.site + nUrl;
+        const novelUrl = nUrl || '';
 
         if (!nUrl) return;
 

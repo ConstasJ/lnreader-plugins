@@ -2,7 +2,7 @@
 
 import { parse as parseProto } from 'protobufjs';
 
-export type FetchInit = {
+type FetchInit = {
   headers?: Record<string, string | undefined> | Headers;
   method?: string;
   body?: FormData | string;
