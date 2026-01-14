@@ -160,10 +160,17 @@ class Linovelib implements Plugin.PluginBase {
         }
 
         const chapterUrl = `/novel/${novelId}/${chapterId}.html`;
+        const chapNameTransDict: Record<string, string> = {
+          '\u004e': '\u5973',
+        };
         const chapterName =
           volumeName +
           ' — ' +
-          chaptersLoadedCheerio(el).find('.chapter-index').text().trim();
+          chaptersLoadedCheerio(el)
+            .find('.chapter-index')
+            .text()
+            .trim()
+            .replace(/./g, char => chapNameTransDict[char] || char);
         const releaseDate = null;
 
         if (!chapterId) return;
