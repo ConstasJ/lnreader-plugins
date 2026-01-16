@@ -4,6 +4,7 @@ import { FilterTypes, Filters } from '@libs/filterInputs';
 import { Plugin } from '@/types/plugin';
 import { NovelStatus } from '@libs/novelStatus';
 import { type Element, type AnyNode } from 'domhandler';
+import { storage } from '@/lib/storage';
 
 type Coefficients = {
   lcgModulus: number;
@@ -29,11 +30,10 @@ function extractChapterLogScriptUrl($: CheerioAPI): string {
 function isCacheValid($: CheerioAPI): boolean {
   const scriptUrl = extractChapterLogScriptUrl($);
   const version = scriptUrl.match(/chapterlog\.js\?(v.*)/)?.[1] || '';
-  const lastVersion =
-    localStorage.getItem('linovelib_chapterlogjs_version') || '';
+  const lastVersion = storage.get('linovelib_chapterlogjs_version') || '';
   const isSameVersion = version === lastVersion;
   if (!isSameVersion) {
-    localStorage.setItem('linovelib_chapterlogjs_version', version);
+    storage.set('linovelib_chapterlogjs_version', version);
   }
   return isSameVersion;
 }
@@ -65,17 +65,17 @@ class LinovelibDecrpytor {
     container.find('div.co').remove();
 
     const coefficients = await (async (): Promise<Coefficients> => {
-      const coefficients: Coefficients | undefined = JSON.parse(
-        localStorage.getItem('linovelib_shuffle_coefficients') || 'null',
+      const coefficients: Coefficients | null = storage.get(
+        'linovelib_shuffle_coefficients',
       );
       if (isCacheValid($) && coefficients) {
         return coefficients;
       } else {
-        // Fetch shuffle coefficients from the remote server hosted by constasj
+        // Fetch shuffle coefficients from the lds server by url sets by a user
         // As the extraction of these coefficients from linovelib's chapterlog.js requires webcrack and babel, and webcrack requires isolated-vm, which needs native compilation
         // which is impossible to be done in this plugin's limited JavaScript runtime.
-        // You can view the source code of server at https://github.com/ConstasJ/linovelib-descramble-server
-        const text = await fetchText('https://lds.constasj.me/coefficients', {
+        // You can view the source code of the lds server at https://github.com/ConstasJ/linovelib-descramble-server
+        const text = await fetchText(`${storage.get('host')}/coefficients`, {
           method: 'GET',
           hedaers: {
             'Accept': 'application/json',
@@ -84,10 +84,7 @@ class LinovelibDecrpytor {
         console.log(text);
         const resObj = JSON.parse(text) as { coefficients: Coefficients };
         const coefficients = resObj.coefficients;
-        localStorage.setItem(
-          'linovelib_shuffle_coefficients',
-          JSON.stringify(coefficients),
-        );
+        storage.set('linovelib_shuffle_coefficients', coefficients);
         return coefficients;
       }
     })();
@@ -184,7 +181,7 @@ class Linovelib implements Plugin.PluginBase {
   name = 'Linovelib';
   icon = 'src/cn/linovelib/icon.png';
   site = 'https://www.bilinovel.com';
-  version = '1.2.1';
+  version = '1.2.0';
   imageRequestInit?: Plugin.ImageRequestInit | undefined = {
     method: 'GET',
     headers: {
@@ -196,6 +193,14 @@ class Linovelib implements Plugin.PluginBase {
     },
   };
   webStorageUtilized = true;
+  pluginSettings = {
+    host: {
+      value: '',
+      label:
+        'Custom Linovelib Descramble Server Host (starts with http:// or https://)',
+      type: 'Text',
+    },
+  };
 
   async popularNovels(
     pageNo: number,
