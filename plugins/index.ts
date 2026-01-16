@@ -58,7 +58,7 @@ import p_55 from '@plugins/english/HiraethTranslation[madara]';
 import p_56 from '@plugins/english/HotNovelPub[hotnovelpub]';
 import p_57 from '@plugins/english/inkitt';
 import p_58 from '@plugins/english/Ippotranslations[lightnovelwp]';
-import p_59 from '@plugins/english/kdtnovels';
+import p_59 from '@plugins/english/KDTNovels[lightnovelwp]';
 import p_60 from '@plugins/english/KeopiTranslations[lightnovelwp]';
 import p_61 from '@plugins/english/KnoxT[lightnovelwp]';
 import p_62 from '@plugins/english/LazyGirlTranslations[lightnovelwp]';

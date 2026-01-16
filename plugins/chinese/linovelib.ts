@@ -1,5 +1,5 @@
 import { CheerioAPI, load as parseHTML } from 'cheerio';
-import { fetchText as ft } from '@libs/fetch';
+import { fetchText } from '@libs/fetch';
 import { FilterTypes, Filters } from '@libs/filterInputs';
 import { Plugin } from '@/types/plugin';
 import { NovelStatus } from '@libs/novelStatus';
@@ -25,11 +25,6 @@ type Coefficients = {
   seedOffset: number;
 };
 
-const coefficientCache = {
-  data: null as Coefficients | null,
-  lastVersion: '',
-};
-
 function extractChapterLogScriptUrl($: CheerioAPI): string {
   return (
     $(
@@ -46,9 +41,12 @@ function extractChapterLogScriptUrl($: CheerioAPI): string {
 function isCacheValid($: CheerioAPI): boolean {
   const scriptUrl = extractChapterLogScriptUrl($);
   const version = scriptUrl.match(/chapterlog\.js\?(v.*)/)?.[1] || '';
-  const lastVersion = coefficientCache.lastVersion;
+  const lastVersion =
+    localStorage.getItem('linovelib_chapterlogjs_version') || '';
   const isSameVersion = version === lastVersion;
-  if (!isSameVersion) coefficientCache.lastVersion = version;
+  if (!isSameVersion) {
+    localStorage.setItem('linovelib_chapterlogjs_version', version);
+  }
   return isSameVersion;
 }
 export class LinovelibDecrpytor {
@@ -79,8 +77,11 @@ export class LinovelibDecrpytor {
     container.find('div.co').remove();
 
     const coefficients = await (async (): Promise<Coefficients> => {
-      if (isCacheValid($) && coefficientCache.data) {
-        return coefficientCache.data;
+      const coefficients: Coefficients | undefined = JSON.parse(
+        localStorage.getItem('linovelib_shuffle_coefficients') || 'null',
+      );
+      if (isCacheValid($) && coefficients) {
+        return coefficients;
       } else {
         // Fetch shuffle coefficients from the remote server hosted by constasj
         // As the extraction of these coefficients from linovelib's chapterlog.js requires webcrack and babel, and webcrack requires isolated-vm, which needs native compilation
@@ -95,7 +96,11 @@ export class LinovelibDecrpytor {
         console.log(text);
         const resObj = JSON.parse(text) as { coefficients: Coefficients };
         const coefficients = resObj.coefficients;
-        return (coefficientCache.data = coefficients);
+        localStorage.setItem(
+          'linovelib_shuffle_coefficients',
+          JSON.stringify(coefficients),
+        );
+        return coefficients;
       }
     })();
 
@@ -186,44 +191,23 @@ export class LinovelibDecrpytor {
     return chapterId;
   }
 }
-
-async function fetchText(url: string, init?: FetchInit) {
-  const actInit = (() => {
-    if (init?.headers) {
-      if (init.headers instanceof Headers) {
-        if (!init.headers.get('User-Agent')) {
-          init.headers.set(
-            'User-Agent',
-            'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
-          );
-        }
-      } else {
-        init.headers = {
-          'User-Agent':
-            'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
-          ...init.headers,
-        };
-      }
-    } else {
-      init = {
-        ...init,
-        headers: {
-          'User-Agent':
-            'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
-        },
-      };
-    }
-    return init;
-  })();
-  return await ft(url, actInit);
-}
-
 class Linovelib implements Plugin.PluginBase {
   id = 'linovelib';
   name = 'Linovelib';
   icon = 'src/cn/linovelib/icon.png';
   site = 'https://www.bilinovel.com';
-  version = '1.2.0';
+  version = '1.2.1';
+  imageRequestInit?: Plugin.ImageRequestInit | undefined = {
+    method: 'GET',
+    headers: {
+      'User-Agent':
+        'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+      'Referer': this.site,
+      'Accept':
+        'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+    },
+  };
+  webStorageUtilized = true;
 
   async popularNovels(
     pageNo: number,
