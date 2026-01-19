@@ -1,181 +1,9 @@
-import { CheerioAPI, load as parseHTML } from 'cheerio';
+import { load as parseHTML } from 'cheerio';
 import { fetchText } from '@libs/fetch';
 import { FilterTypes, Filters } from '@libs/filterInputs';
 import { Plugin } from '@/types/plugin';
-import { NovelStatus } from '@libs/novelStatus';
-import { type Element, type AnyNode } from 'domhandler';
 import { storage } from '@libs/storage';
 
-type Coefficients = {
-  lcgModulus: number;
-  lcgMultiplier: number;
-  lcgIncrement: number;
-  seedMultiplier: number;
-  seedOffset: number;
-};
-
-function extractChapterLogScriptUrl($: CheerioAPI): string {
-  return (
-    $(
-      $('script')
-        .toArray()
-        .find(el => {
-          const scriptContent = $(el).attr('src') || '';
-          return /chapterlog\.js/.test(scriptContent);
-        }),
-    ).attr('src') || ''
-  );
-}
-
-function isCacheValid($: CheerioAPI): boolean {
-  const scriptUrl = extractChapterLogScriptUrl($);
-  const version = scriptUrl.match(/chapterlog\.js\?(v.*)/)?.[1] || '';
-  const lastVersion = storage.get('linovelib_chapterlogjs_version') || '';
-  const isSameVersion = version === lastVersion;
-  if (!isSameVersion) {
-    storage.set('linovelib_chapterlogjs_version', version);
-  }
-  return isSameVersion;
-}
-class LinovelibDecrpytor {
-  public static async decrypt($: CheerioAPI): Promise<string> {
-    const chapterId = this.extractChapterId($);
-    const container = $('#acontent');
-    if (!container.length) return '';
-
-    container.find('p').each((_, el) => {
-      const $el = $(el);
-      const innerHtml = $el.html();
-      if (innerHtml) {
-        const cleanedHtml = innerHtml.replace(/^\s+|(?<=>)\s+/g, '');
-        $el.html(cleanedHtml);
-      }
-    });
-
-    container.find('img.imagecontent').each((_, el) => {
-      const imgSrc = $(el).attr('data-src') || $(el).attr('src');
-      if (imgSrc) {
-        $(el)
-          .attr('src', imgSrc)
-          .removeAttr('data-src')
-          .removeClass('lazyload');
-      }
-    });
-
-    container.find('div.co').remove();
-
-    const coefficients = await (async (): Promise<Coefficients> => {
-      const coefficients: Coefficients | null = storage.get(
-        'linovelib_shuffle_coefficients',
-      );
-      if (isCacheValid($) && coefficients) {
-        return coefficients;
-      } else {
-        // Fetch shuffle coefficients from the lds server by url sets by a user
-        // As the extraction of these coefficients from linovelib's chapterlog.js requires webcrack and babel, and webcrack requires isolated-vm, which needs native compilation
-        // which is impossible to be done in this plugin's limited JavaScript runtime.
-        // You can view the source code of the lds server at https://github.com/ConstasJ/linovelib-descramble-server
-        const text = await fetchText(`${storage.get('host')}/coefficients`, {
-          method: 'GET',
-          hedaers: {
-            'Accept': 'application/json',
-          },
-        });
-        console.log(text);
-        const resObj = JSON.parse(text) as { coefficients: Coefficients };
-        const coefficients = resObj.coefficients;
-        storage.set('linovelib_shuffle_coefficients', coefficients);
-        return coefficients;
-      }
-    })();
-
-    const allChildren = container
-      .contents()
-      .toArray()
-      .filter(node => !(node.type === 'tag' && node.tagName === 'div'));
-
-    const sortableEntries: { element: Element; originalPos: number }[] = [];
-
-    allChildren.forEach((node, index) => {
-      if (node.type === 'tag' && node.tagName === 'p') {
-        const text = $(node).text().trim();
-        if (text.length > 0) {
-          sortableEntries.push({ element: node, originalPos: index });
-        }
-      }
-    });
-
-    const pCount = sortableEntries.length;
-    if (pCount <= 20) {
-      return container.html() || '';
-    }
-
-    const seed =
-      parseInt(chapterId, 10) * coefficients.seedMultiplier +
-      coefficients.seedOffset;
-
-    const dynamicIndices = Array.from(
-      { length: pCount - 20 },
-      (_, i) => i + 20,
-    );
-    const shuffledIndices = this.shuffle(dynamicIndices, seed);
-
-    const fullMapping = Array.from({ length: 20 }, (_, i) => i).concat(
-      shuffledIndices,
-    );
-
-    const restoredChildren: (AnyNode | null)[] = [...allChildren];
-
-    sortableEntries.forEach((entry, i) => {
-      const targetLogicalPos = fullMapping[i];
-      const actualSlot = sortableEntries[targetLogicalPos]?.originalPos;
-      restoredChildren[actualSlot] = entry.element;
-    });
-
-    const newContainer = $('<div></div>');
-    restoredChildren.forEach(node => {
-      if (node && node.type === 'tag') {
-        newContainer.append($(node));
-        newContainer.append('\n');
-      }
-    });
-
-    return newContainer.html() || '';
-  }
-
-  private static shuffle(array: number[], seed: number): number[] {
-    let currentSeed = seed;
-    const result = [...array];
-    const len = result.length;
-
-    for (let i = len - 1; i > 0; i--) {
-      currentSeed = (currentSeed * 9302 + 49397) % 233280;
-      const j = Math.floor((currentSeed / 233280) * (i + 1));
-
-      // 交换
-      const temp = result[i];
-      result[i] = result[j];
-      result[j] = temp;
-    }
-    return result;
-  }
-
-  private static extractChapterId($: CheerioAPI): string {
-    const scriptTags = $('script');
-    let chapterId = '';
-    scriptTags.each((_, el) => {
-      const scriptContent = $(el).html();
-      if (scriptContent) {
-        const match = scriptContent.match(/chapterid\s*:\s*'(\d+)'/);
-        if (match && match[1]) {
-          chapterId = match[1];
-          return false; // Break the loop
-        }
-      }
-    });
-    return chapterId;
-  }
-}
 class Linovelib implements Plugin.PluginBase {
   id = 'linovelib';
   name = 'Linovelib';
@@ -186,8 +14,8 @@ class Linovelib implements Plugin.PluginBase {
     method: 'GET',
     headers: {
       'User-Agent':
-        'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
-      'Referer': this.site,
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36 Edg/144.0.0.0',
+      'Referer': 'https://www.linovelib.com',
       'Accept':
         'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
     },
@@ -195,9 +23,8 @@ class Linovelib implements Plugin.PluginBase {
   webStorageUtilized = true;
   pluginSettings = {
     host: {
-      value: '',
-      label:
-        'Custom Linovelib Descramble Server Host (starts with http:// or https://)',
+      value: 'http://example.com',
+      label: 'Custom LDS Host',
       type: 'Text',
     },
   };
@@ -242,461 +69,43 @@ class Linovelib implements Plugin.PluginBase {
   }
 
   async parseNovel(novelPath: string): Promise<Plugin.SourceNovel> {
-    const url = this.site + novelPath;
-
-    const body = await fetchText(url);
-    if (body === '') throw Error('无法获取小说内容，请检查网络');
-
-    const loadedCheerio = parseHTML(body);
-
-    const novel: Plugin.SourceNovel = {
-      path: novelPath,
-      chapters: [],
-      name: loadedCheerio('#bookDetailWrapper .book-title').text(),
-    };
-
-    novel.cover = loadedCheerio('#bookDetailWrapper img.book-cover').attr(
-      'src',
+    const serverUrl = storage.get('host');
+    return JSON.parse(
+      await fetchText(`${serverUrl}/api/novel`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ path: novelPath }),
+      }),
     );
-
-    novel.summary = loadedCheerio('#bookSummary content').text();
-
-    novel.author = loadedCheerio(
-      '#bookDetailWrapper .book-rand-a .authorname a',
-    ).text();
-
-    const meta = loadedCheerio('#bookDetailWrapper .book-meta').text();
-    novel.status = meta.includes('完结')
-      ? NovelStatus.Completed
-      : NovelStatus.Ongoing;
-
-    novel.genres = loadedCheerio('.tag-small.red')
-      .children('a')
-      .map((i, el) => loadedCheerio(el).text())
-      .toArray()
-      .join(',');
-
-    // Table of Content is on a different page than the summary page
-    const chapter: Plugin.ChapterItem[] = [];
-
-    const idPattern = /\/(\d+)\.html/;
-    const novelId = url.match(idPattern)?.[1];
-
-    const chaptersUrl = this.site + loadedCheerio('#btnReadBook').attr('href');
-    const chaptersBody = await fetchText(chaptersUrl);
-
-    const chaptersLoadedCheerio = parseHTML(chaptersBody);
-
-    let volumeName: string, chapterId: number;
-
-    let chapterCounter = 0;
-
-    chaptersLoadedCheerio('#volumes .chapter-li:not(.volume-cover)').each(
-      (i, el) => {
-        if (chaptersLoadedCheerio(el).hasClass('chapter-bar')) {
-          volumeName = chaptersLoadedCheerio(el).text();
-          return;
-        } else {
-          const urlPart = chaptersLoadedCheerio(el)
-            .find('.chapter-li-a')
-            .attr('href');
-          const chapterIdMatch = urlPart?.match(idPattern);
-
-          // Sometimes the href attribute does not contain the url, but javascript:cid(0).
-          // Increment the previous chapter ID should result in the right URL
-          if (chapterIdMatch) {
-            chapterId = +chapterIdMatch[1];
-          } else {
-            chapterId++;
-          }
-        }
-
-        const chapterUrl = `/novel/${novelId}/${chapterId}.html`;
-        const chapNameTransDict: Record<string, string> = {
-          '\u004e': '\u5973',
-        };
-        const chapterName =
-          volumeName +
-          ' — ' +
-          chaptersLoadedCheerio(el)
-            .find('.chapter-index')
-            .text()
-            .trim()
-            .replace(/./g, char => chapNameTransDict[char] || char);
-        const releaseDate = null;
-
-        if (!chapterId) return;
-
-        chapterCounter++;
-
-        chapter.push({
-          name: chapterName,
-          releaseTime: releaseDate,
-          path: chapterUrl,
-          chapterNumber: chapterCounter,
-        });
-      },
-    );
-
-    novel.chapters = chapter;
-
-    return novel;
   }
 
   async parseChapter(chapterPath: string): Promise<string> {
-    let chapterName,
-      chapterText = '',
-      hasNextPage,
-      pageHasNextPage,
-      pageText = '';
-    let pageNumber = 1;
-
-    /*
-     * TODO: Maybe there are other ways to get the translation table
-     * It is embed and encrypted inside readtool.js
-     * UPDATE: Decrypted, see skillgg
-     */
-    // const mapping_dict = {
-    //   '“': '「',
-    //   '’': '』',
-    //   '': '是',
-    //   '': '不',
-    //   '': '好',
-    //   '': '个',
-    //   '': '开',
-    //   '': '样',
-    //   '': '想',
-    //   '': '说',
-    //   '': '年',
-    //   '': '那',
-    //   '': '她',
-    //   '': '美',
-    //   '': '自',
-    //   '': '家',
-    //   '': '而',
-    //   '': '去',
-    //   '': '都',
-    //   '': '于',
-    //   '': '舔',
-    //   '': '他',
-    //   '': '只',
-    //   '': '看',
-    //   '': '来',
-    //   '': '用',
-    //   '': '道',
-    //   '': '得',
-    //   '': '乳',
-    //   '': '茎',
-    //   '': '肉',
-    //   '': '胸',
-    //   '': '淫',
-    //   '': '性',
-    //   '': '骚',
-    //   '”': '」',
-    //   '': '的',
-    //   '': '当',
-    //   '': '人',
-    //   '': '有',
-    //   '': '上',
-    //   '': '到',
-    //   '': '地',
-    //   '': '中',
-    //   '': '生',
-    //   '': '着',
-    //   '': '和',
-    //   '': '起',
-    //   '': '交',
-    //   '': '以',
-    //   '': '可',
-    //   '': '过',
-    //   '': '能',
-    //   '': '多',
-    //   '': '心',
-    //   '': '小',
-    //   '': '成',
-    //   '': '了',
-    //   '': '把',
-    //   '': '发',
-    //   '': '第',
-    //   '': '子',
-    //   '': '事',
-    //   '': '阴',
-    //   '': '欲',
-    //   '': '里',
-    //   '': '私',
-    //   '': '臀',
-    //   '': '脱',
-    //   '': '唇',
-    //   '‘': '『',
-    //   '': '一',
-    //   '': '我',
-    //   '': '在',
-    //   '': '这',
-    //   '': '们',
-    //   '': '时',
-    //   '': '为',
-    //   '': '你',
-    //   '': '国',
-    //   '': '就',
-    //   '': '要',
-    //   '': '也',
-    //   '': '后',
-    //   '': '没',
-    //   '': '下',
-    //   '': '天',
-    //   '': '对',
-    //   '': '然',
-    //   '': '学',
-    //   '': '之',
-    //   '': '出',
-    //   '': '没',
-    //   '': '如',
-    //   '': '还',
-    //   '': '大',
-    //   '': '作',
-    //   '': '种',
-    //   '': '液',
-    //   '': '呻',
-    //   '': '射',
-    //   '': '穴',
-    //   '': '么',
-    //   '': '裸',
-    // };
-    const skillgg: Record<string, string> = {
-      '\u201c': '\u300c',
-      '\u201d': '\u300d',
-      '\u2018': '\u300e',
-      '\u2019': '\u300f',
-      '\ue82c': '\u7684',
-      '\ue852': '\u4e00',
-      '\ue82d': '\u662f',
-      '\ue819': '\u4e86',
-      '\ue856': '\u6211',
-      '\ue857': '\u4e0d',
-      '\ue816': '\u4eba',
-      '\ue83c': '\u5728',
-      '\ue830': '\u4ed6',
-      '\ue82e': '\u6709',
-      '\ue836': '\u8fd9',
-      '\ue859': '\u4e2a',
-      '\ue80a': '\u4e0a',
-      '\ue855': '\u4eec',
-      '\ue842': '\u6765',
-      '\ue858': '\u5230',
-      '\ue80b': '\u65f6',
-      '\ue81f': '\u5927',
-      '\ue84a': '\u5730',
-      '\ue853': '\u4e3a',
-      '\ue81e': '\u5b50',
-      '\ue822': '\u4e2d',
-      '\ue813': '\u4f60',
-      '\ue85b': '\u8bf4',
-      '\ue807': '\u751f',
-      '\ue818': '\u56fd',
-      '\ue810': '\u5e74',
-      '\ue812': '\u7740',
-      '\ue851': '\u5c31',
-      '\ue801': '\u90a3',
-      '\ue80c': '\u548c',
-      '\ue815': '\u8981',
-      '\ue84c': '\u5979',
-      '\ue840': '\u51fa',
-      '\ue848': '\u4e5f',
-      '\ue835': '\u5f97',
-      '\ue800': '\u91cc',
-      '\ue826': '\u540e',
-      '\ue863': '\u81ea',
-      '\ue861': '\u4ee5',
-      '\ue854': '\u4f1a',
-      '\ue827': '\u5bb6',
-      '\ue83b': '\u53ef',
-      '\ue85d': '\u4e0b',
-      '\ue84d': '\u800c',
-      '\ue862': '\u8fc7',
-      '\ue81c': '\u5929',
-      '\ue81d': '\u53bb',
-      '\ue860': '\u80fd',
-      '\ue843': '\u5bf9',
-      '\ue82f': '\u5c0f',
-      '\ue802': '\u591a',
-      '\ue831': '\u7136',
-      '\ue84b': '\u4e8e',
-      '\ue837': '\u5fc3',
-      '\ue829': '\u5b66',
-      '\ue85e': '\u4e48',
-      '\ue83a': '\u4e4b',
-      '\ue832': '\u90fd',
-      '\ue808': '\u597d',
-      '\ue841': '\u770b',
-      '\ue821': '\u8d77',
-      '\ue845': '\u53d1',
-      '\ue803': '\u5f53',
-      '\ue828': '\u6ca1',
-      '\ue81b': '\u6210',
-      '\ue83e': '\u53ea',
-      '\ue820': '\u5982',
-      '\ue84e': '\u4e8b',
-      '\ue85a': '\u628a',
-      '\ue806': '\u8fd8',
-      '\ue83f': '\u7528',
-      '\ue833': '\u7b2c',
-      '\ue811': '\u6837',
-      '\ue804': '\u9053',
-      '\ue814': '\u60f3',
-      '\ue80f': '\u4f5c',
-      '\ue84f': '\u79cd',
-      '\ue80e': '\u5f00',
-      '\ue823': '\u7f8e',
-      '\ue849': '\u4e73',
-      '\ue805': '\u9634',
-      '\ue809': '\u6db2',
-      '\ue81a': '\u830e',
-      '\ue844': '\u6b32',
-      '\ue847': '\u547b',
-      '\ue850': '\u8089',
-      '\ue824': '\u4ea4',
-      '\ue85f': '\u6027',
-      '\ue817': '\u80f8',
-      '\ue85c': '\u79c1',
-      '\ue838': '\u7a74',
-      '\ue82a': '\u6deb',
-      '\ue83d': '\u81c0',
-      '\ue82b': '\u8214',
-      '\ue80d': '\u5c04',
-      '\ue839': '\u8131',
-      '\ue834': '\u88f8',
-      '\ue846': '\u9a9a',
-      '\ue825': '\u5507',
-    };
-    const addPage = async (pageCheerio: CheerioAPI) => {
-      const formatPage = async () => {
-        pageText = (await LinovelibDecrpytor.decrypt(pageCheerio)).replace(
-          /./g,
-          char => skillgg[char] || char,
-        );
-
-        return Promise.resolve();
-      };
-
-      await formatPage();
-      chapterName =
-        pageCheerio('#atitle + h3').text() +
-        ' — ' +
-        pageCheerio('#atitle').text();
-      if (chapterText === '') {
-        chapterText = '<h2>' + chapterName + '</h2>';
-      }
-      chapterText += pageText;
-    };
-
-    const loadPage = async (url: string) => {
-      const headers = {
-        'Accept':
-          'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-        'Accept-Language':
-          'zh-CN,zh;q=0.9,zh-TW;q=0.8,zh-HK;q=0.7,en;q=0.6,en-GB;q=0.5,en-US;q=0.4',
-        'Cache-Control': 'no-cache',
-      };
-
-      const body = await fetchText(url, { headers });
-      const pageCheerio = parseHTML(body);
-      await addPage(pageCheerio);
-      pageHasNextPage =
-        pageCheerio('#footlink a:last').text() === '下一页' ||
-        pageCheerio('#footlink a:last').text() === '下一頁'
-          ? true
-          : false;
-      return { pageCheerio, pageHasNextPage };
-    };
-
-    let url = this.site + chapterPath;
-    const baseUrl = url;
-    do {
-      const page = await loadPage(url);
-      hasNextPage = page.pageHasNextPage;
-      if (hasNextPage === true) {
-        pageNumber++;
-        url = baseUrl.replace(/\.html/gi, `_${pageNumber}` + '.html');
-      }
-    } while (hasNextPage === true);
-    return chapterText;
+    const serverUrl = storage.get('host');
+    return await fetchText(`${serverUrl}/api/chapter`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ path: chapterPath }),
+    });
   }
 
   async searchNovels(
     searchTerm: string,
     pageNo: number,
   ): Promise<Plugin.NovelItem[]> {
-    const url = `${this.site}/search.html?searchkey=${encodeURIComponent(searchTerm)}`;
-
-    const body = await fetchText(url, {
-      headers: {
-        'Referer': url,
-        'Cookie': 'night=0',
-      },
-    });
-
-    if (body === '') throw Error('无法获取搜索结果，请检查网络');
-
-    const pageCheerio = parseHTML(body);
-
-    const novels: Plugin.NovelItem[] = [];
-
-    const loadSearchResults = () => {
-      pageCheerio('.book-ol .book-layout').each((i, el) => {
-        const nUrl = pageCheerio(el).attr('href')?.replace(this.site, '');
-
-        const novelName = pageCheerio(el).find('.book-title').text();
-        const novelCover = pageCheerio(el)
-          .find('div.book-cover > img')
-          .attr('data-src');
-        const novelUrl = nUrl || '';
-
-        if (!nUrl) return;
-
-        novels.push({
-          name: novelName,
-          path: novelUrl,
-          cover: novelCover,
-        });
-      });
-    };
-
-    const addPage = async (pageCheerio: CheerioAPI, redirect: string) => {
-      const novelResults = pageCheerio('.book-ol a.book-layout');
-      if (novelResults.length === 0) {
-        // No results found, nothing to do
-      } else {
-        loadSearchResults();
-      }
-
-      if (redirect.length) {
-        novels.length = 0;
-        const novelName = pageCheerio('.book-detail-info .book-title').text();
-
-        const novelCover = pageCheerio(
-          '.book-detail-info div.module-item-cover > img',
-        ).attr('src');
-        const novelUrl =
-          pageCheerio('#btnReadBook').attr('href')?.slice(0, -8) + '.html';
-        novels.push({
-          name: novelName,
-          path: novelUrl,
-          cover: novelCover,
-        });
-      }
-    };
-
-    // NOTE: don't know redirect is for what, comment out for now
-    // Note: Found that Linovelib will redirect to the novel page if there's only one result,so uncommenting this out
-
-    const redirect = pageCheerio('div.book-layout').text();
-    if (redirect.length > 0) {
-      await addPage(pageCheerio, redirect);
-    } else {
-      loadSearchResults();
-    }
-
-    return novels;
+    const serverUrl = storage.get('host');
+    return await JSON.parse(
+      await fetchText(`${serverUrl}/api/search`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ keyword: searchTerm }),
+      }),
+    );
   }
 
   filters = {
