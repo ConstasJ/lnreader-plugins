@@ -9,7 +9,7 @@ class Linovelib implements Plugin.PluginBase {
   name = 'Linovelib';
   icon = 'src/cn/linovelib/icon.png';
   site = 'https://www.bilinovel.com';
-  version = '1.2.0';
+  version = '1.2.1';
   imageRequestInit?: Plugin.ImageRequestInit | undefined = {
     method: 'GET',
     headers: {
@@ -30,6 +30,21 @@ class Linovelib implements Plugin.PluginBase {
     },
   };
   serverUrl = storage.get('host') || 'http://localhost:5301';
+  private readonly coverUrlPrefix =
+    'https://www.bilinovel.com/files/article/image';
+
+  /** 将封面原始 URL 改写为服务端代理地址 */
+  private proxyCoverUrl(originalUrl: string): string {
+    let path = originalUrl;
+    if (path.startsWith(this.coverUrlPrefix)) {
+      path = path.slice(this.coverUrlPrefix.length);
+    }
+    const qIndex = path.indexOf('?');
+    if (qIndex !== -1) {
+      path = path.slice(0, qIndex);
+    }
+    return `${this.serverUrl}/api/cover${path}`;
+  }
 
   async popularNovels(
     pageNo: number,
@@ -60,7 +75,7 @@ class Linovelib implements Plugin.PluginBase {
 
       const novel = {
         name: novelName,
-        cover: novelCover,
+        cover: novelCover ? this.proxyCoverUrl(novelCover) : undefined,
         path: url,
       };
 
