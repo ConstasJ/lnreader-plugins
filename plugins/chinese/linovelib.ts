@@ -56,7 +56,14 @@ class Linovelib implements Plugin.PluginBase {
     const rank = showLatestNovels ? 'lastupdate' : filters.rank.value;
     const url = `${this.site}/top/${rank}/${pageNo}.html`;
 
-    const body = await fetchText(url);
+    const body = await fetchText(url, {
+      headers: new Headers({
+        'Accept':
+          'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'Accept-Encoding': 'gzip, deflate',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+      }),
+    });
     if (body === '') throw Error('无法获取小说列表，请检查网络');
 
     const loadedCheerio = parseHTML(body);
