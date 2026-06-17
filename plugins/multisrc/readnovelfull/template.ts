@@ -1,8 +1,9 @@
 import { Parser } from 'htmlparser2';
-import { fetchApi } from '@libs/fetch';
+import { fetchApi, FetchInit } from '@libs/fetch';
 import { Plugin } from '@/types/plugin';
 import { NovelStatus } from '@libs/novelStatus';
 import { Filters } from '@libs/filterInputs';
+import { load } from 'cheerio';
 
 type ReadNovelFullOptions = {
   lang?: string;
@@ -23,6 +24,7 @@ type ReadNovelFullOptions = {
   noAjax?: boolean;
   noPages?: string[];
   pageAsPath?: boolean;
+  customJs?: string;
 };
 
 export type ReadNovelFullMetadata = {
@@ -30,10 +32,10 @@ export type ReadNovelFullMetadata = {
   sourceSite: string;
   sourceName: string;
   options: ReadNovelFullOptions;
-  filters?: any;
+  filters?: Filters;
 };
 
-class ReadNovelFullPlugin implements Plugin.PluginBase {
+export class ReadNovelFullPlugin implements Plugin.PluginBase {
   id: string;
   name: string;
   icon: string;
@@ -48,7 +50,7 @@ class ReadNovelFullPlugin implements Plugin.PluginBase {
     this.icon = `multisrc/readnovelfull/${metadata.id.toLowerCase()}/icon.png`;
     this.site = metadata.sourceSite;
     const versionIncrements = metadata.options?.versionIncrements || 0;
-    this.version = `2.1.${2 + versionIncrements}`;
+    this.version = `2.2.${1 + versionIncrements}`;
     this.options = metadata.options;
     this.filters = metadata.filters;
   }
@@ -90,9 +92,11 @@ class ReadNovelFullPlugin implements Plugin.PluginBase {
 
         switch (name) {
           case 'img':
-            const cover = attribs['data-src'] || attribs.src;
-            if (cover) {
-              tempNovel.cover = new URL(cover, this.site).href;
+            {
+              const cover = attribs['data-src'] || attribs.src;
+              if (cover) {
+                tempNovel.cover = new URL(cover, this.site).href;
+              }
             }
             break;
           case 'h3':
@@ -141,7 +145,10 @@ class ReadNovelFullPlugin implements Plugin.PluginBase {
 
   async popularNovels(
     pageNo: number,
-    { filters, showLatestNovels }: Plugin.PopularNovelsOptions,
+    {
+      filters,
+      showLatestNovels,
+    }: Plugin.PopularNovelsOptions<typeof this.filters>,
   ): Promise<Plugin.NovelItem[]> {
     const {
       pageParam = 'page',
@@ -256,6 +263,7 @@ class ReadNovelFullPlugin implements Plugin.PluginBase {
                 return;
               case 'inner':
               case 'desc-text':
+              case 'desc-text desc-text-collapsed':
                 if (state === ParsingState.Cover) popState();
                 pushState(ParsingState.Summary);
                 break;
@@ -431,15 +439,17 @@ class ReadNovelFullPlugin implements Plugin.PluginBase {
                   novel.genres = detail;
                   break;
                 case 'status':
-                  const map: Record<string, string> = {
-                    ongoing: NovelStatus.Ongoing,
-                    hiatus: NovelStatus.OnHiatus,
-                    dropped: NovelStatus.Cancelled,
-                    cancelled: NovelStatus.Cancelled,
-                    completed: NovelStatus.Completed,
-                  };
-                  novel.status =
-                    map[detail.toLowerCase()] ?? NovelStatus.Unknown;
+                  {
+                    const map: Record<string, string> = {
+                      ongoing: NovelStatus.Ongoing,
+                      hiatus: NovelStatus.OnHiatus,
+                      dropped: NovelStatus.Cancelled,
+                      cancelled: NovelStatus.Cancelled,
+                      completed: NovelStatus.Completed,
+                    };
+                    novel.status =
+                      map[detail.toLowerCase()] ?? NovelStatus.Unknown;
+                  }
                   break;
                 default:
                   return;
@@ -545,7 +555,17 @@ class ReadNovelFullPlugin implements Plugin.PluginBase {
 
   async parseChapter(chapterPath: string): Promise<string> {
     const response = await fetchApi(this.site + chapterPath);
-    const html = await response.text();
+    let html = await response.text();
+    if (this.options?.customJs) {
+      try {
+        const $ = load(html);
+        // CustomJS HERE
+        html = $.html();
+      } catch (error) {
+        console.error('Error executing customJs:', error);
+        throw error;
+      }
+    }
 
     let depth: number;
     let depthHide: number;
@@ -559,18 +579,17 @@ class ReadNovelFullPlugin implements Plugin.PluginBase {
     const popState = () =>
       stateStack.length > 1 ? stateStack.pop() : currentState();
 
-    type EscapeChar = '&' | '<' | '>' | '"' | "'" | ' ';
-    const escapeRegex = /[&<>"' ]/g;
-    const escapeMap: Record<EscapeChar, string> = {
+    const escapeMap: Record<string, string> = {
       '&': '&amp;',
       '<': '&lt;',
       '>': '&gt;',
       '"': '&quot;',
       "'": '&#39;',
       ' ': '&nbsp;',
+      '\u200C': '', // this is probably a breaking change, report if paragraphs look weird
     };
-    const escapeHtml = (text: string): string =>
-      text.replace(escapeRegex, char => escapeMap[char as EscapeChar]);
+    const escapeHtml = (text: string) =>
+      text.replace(/[&<>"'\xA0\u200C]/g, char => escapeMap[char]);
 
     const parser = new Parser({
       onopentag(name, attribs) {
@@ -588,7 +607,7 @@ class ReadNovelFullPlugin implements Plugin.PluginBase {
             }
             break;
           case ParsingState.Chapter:
-            if (name === 'sub') {
+            if (name === 'sub' || name === 'iframe') {
               pushState(ParsingState.Hidden);
             } else if (name === 'div') {
               depth++;
@@ -641,7 +660,8 @@ class ReadNovelFullPlugin implements Plugin.PluginBase {
 
       ontext(text) {
         if (currentState() === ParsingState.Chapter) {
-          chapterHtml.push(escapeHtml(text));
+          const data = escapeHtml(text);
+          chapterHtml.push(data.trim().replace(/\s\s+/, ' '));
         }
       },
 
@@ -649,7 +669,7 @@ class ReadNovelFullPlugin implements Plugin.PluginBase {
         const state = currentState();
 
         if (state === ParsingState.Hidden) {
-          if (name === 'sub') {
+          if (name === 'sub' || name === 'iframe') {
             popState();
           } else if (name === 'div') {
             depthHide--;
@@ -714,7 +734,7 @@ class ReadNovelFullPlugin implements Plugin.PluginBase {
 
     const url = `${this.site}${searchPage}${!postSearch ? `?${params.toString()}` : ''}`;
 
-    const fetchOptions: RequestInit | undefined = postSearch
+    const fetchOptions: FetchInit | undefined = postSearch
       ? {
           method: 'POST',
           body: params.toString(),

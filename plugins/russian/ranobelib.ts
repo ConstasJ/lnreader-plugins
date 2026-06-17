@@ -13,19 +13,30 @@ const statusKey: Record<number, string> = {
   4: NovelStatus.Cancelled,
 };
 
+const BASE_HEADERS = {
+  Accept: 'application/json',
+  Referer: 'https://ranobelib.me',
+  Origin: 'https://ranobelib.me/',
+  'Site-Id': '3',
+  'client-time-zone':
+    Intl.DateTimeFormat().resolvedOptions().timeZone || 'Europe/Moscow',
+  'User-Agent':
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 YaBrowser/25.12.0.0 Safari/537.36',
+};
+
 class RLIB implements Plugin.PluginBase {
   id = 'RLIB';
   name = 'RanobeLib';
   site = 'https://ranobelib.me';
   apiSite = 'https://api.cdnlibs.org/api/manga/';
-  version = '2.2.1';
+  version = '2.2.4';
   icon = 'src/ru/ranobelib/icon.png';
   webStorageUtilized = true;
   imageRequestInit = {
     headers: {
+      ...BASE_HEADERS,
       Accept:
         'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
-      Referer: this.site,
     },
   };
 
@@ -83,7 +94,7 @@ class RLIB implements Plugin.PluginBase {
     }
 
     const result: TopLevel = await fetchApi(url, {
-      headers: this.user?.token,
+      headers: this.getHeaders(),
     }).then(res => res.json());
 
     const novels: Plugin.NovelItem[] = [];
@@ -102,14 +113,19 @@ class RLIB implements Plugin.PluginBase {
   async parseNovel(novelPath: string): Promise<Plugin.SourceNovel> {
     const { data }: { data: DataClass } = await fetchApi(
       `${this.apiSite}${novelPath}?fields[]=summary&fields[]=genres&fields[]=tags&fields[]=teams&fields[]=authors&fields[]=status_id&fields[]=artists`,
-      { headers: { ...this.user?.token, 'Site-Id': '3' } },
+      { headers: this.getHeaders() },
     ).then(res => res.json());
 
     const novel: Plugin.SourceNovel = {
       path: novelPath,
       name: data.rus_name || data.name,
       cover: data.cover?.default || defaultCover,
-      summary: data.summary?.trim(),
+      summary:
+        typeof data.summary === 'string'
+          ? data.summary.trim()
+          : data.summary?.type === 'doc'
+            ? jsonToHtml(data.summary.content, [])
+            : undefined,
     };
 
     if (data.status?.id) {
@@ -141,7 +157,7 @@ class RLIB implements Plugin.PluginBase {
 
     const chaptersJSON: { data: DataChapter[] } = await fetchApi(
       `${this.apiSite}${novelPath}/chapters`,
-      { headers: this.user?.token },
+      { headers: this.getHeaders() },
     ).then(res => res.json());
 
     if (chaptersJSON.data?.length) {
@@ -205,15 +221,13 @@ class RLIB implements Plugin.PluginBase {
           number +
           '&volume=' +
           volume,
-        { headers: this.user?.token },
+        { headers: this.getHeaders() },
       ).then(res => res.json());
+      const content = result?.data?.content;
       chapterText =
-        result?.data?.content?.type == 'doc'
-          ? jsonToHtml(
-              result.data.content.content,
-              result.data.attachments || [],
-            )
-          : result?.data?.content;
+        typeof content === 'object' && content?.type === 'doc'
+          ? jsonToHtml(content.content, result.data.attachments || [])
+          : (content as string) || '';
     }
     return chapterText;
   }
@@ -221,7 +235,7 @@ class RLIB implements Plugin.PluginBase {
   async searchNovels(searchTerm: string): Promise<Plugin.NovelItem[]> {
     const url = this.apiSite + '?site_id[0]=3&q=' + searchTerm;
     const result: TopLevel = await fetchApi(url, {
-      headers: this.user?.token,
+      headers: this.getHeaders(),
     }).then(res => res.json());
 
     const novels: Plugin.NovelItem[] = [];
@@ -261,7 +275,9 @@ class RLIB implements Plugin.PluginBase {
   };
 
   getUser = () => {
-    const user = storage.get('user');
+    const user = storage.get('user') as
+      | { token: string; id: number }
+      | undefined;
     if (user) {
       return { token: { Authorization: 'Bearer ' + user.token }, ui: user.id };
     }
@@ -285,6 +301,17 @@ class RLIB implements Plugin.PluginBase {
       ui: data.auth.id,
     };
   };
+
+  protected getHeaders() {
+    const apiUrl = new URL(this.apiSite);
+
+    return {
+      ...BASE_HEADERS,
+      Host: apiUrl.host,
+      ...(this.user?.token || {}),
+    };
+  }
+
   user = this.getUser(); //To change the account, you need to restart the application
 
   filters = {
@@ -636,7 +663,7 @@ type AgeRestriction = {
 
 type Branch = {
   id: number;
-  branch_id: null;
+  branch_id: number | null;
   created_at: string;
   teams: BranchTeam[];
   user: User;
@@ -673,7 +700,7 @@ type DataClass = {
   ageRestriction?: AgeRestriction;
   site?: number;
   type: string;
-  summary?: string;
+  summary?: string | { type: string; content: HTML[] };
   is_licensed?: boolean;
   teams: DataTeam[];
   genres?: Genre[];
@@ -692,7 +719,7 @@ type DataClass = {
   created_at?: string;
   moderated?: AgeRestriction;
   likes_count?: number;
-  content?: any;
+  content?: string | { type: string; content: HTML[] };
   attachments?: Attachment[];
 };
 
