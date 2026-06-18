@@ -8,14 +8,14 @@ class Linovelib implements Plugin.PluginBase {
   id = 'linovelib';
   name = 'Linovelib';
   icon = 'src/cn/linovelib/icon.png';
-  site = 'https://www.bilinovel.com';
+  site = 'https://m.bilinovel.com';
   version = '1.2.2';
   imageRequestInit?: Plugin.ImageRequestInit | undefined = {
     method: 'GET',
     headers: {
       'User-Agent':
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36 Edg/144.0.0.0',
-      Referer: 'https://www.linovelib.com',
+      Referer: 'https://m.bilinovel.com',
       Accept:
         'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
     },
@@ -31,7 +31,7 @@ class Linovelib implements Plugin.PluginBase {
   };
   serverUrl = storage.get('host') || 'http://localhost:5301';
   private readonly coverUrlPrefix =
-    'https://www.bilinovel.com/files/article/image';
+    'https://m.bilinovel.com/files/article/image';
 
   /** 将封面原始 URL 改写为服务端代理地址 */
   private proxyCoverUrl(originalUrl: string): string {
