@@ -9,7 +9,7 @@ class Linovelib implements Plugin.PluginBase {
   name = 'Linovelib';
   icon = 'src/cn/linovelib/icon.png';
   site = 'https://www.bilinovel.com';
-  version = '1.2.3';
+  version = '1.2.2';
   imageRequestInit?: Plugin.ImageRequestInit | undefined = {
     method: 'GET',
     headers: {
@@ -81,10 +81,13 @@ class Linovelib implements Plugin.PluginBase {
         ?.replace('/https', 'https');
       if (!url) return;
 
+      const novelId = url.match(/\/novel\/(\d+)\.html/)?.[1];
+      if (!novelId) return;
+
       const novel = {
         name: novelName,
         cover: novelCover ? this.proxyCoverUrl(novelCover) : undefined,
-        path: url.replace('.html', ''),
+        path: novelId,
       };
 
       novels.push(novel);
