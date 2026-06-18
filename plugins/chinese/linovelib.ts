@@ -43,7 +43,8 @@ class Linovelib implements Plugin.PluginBase {
     if (qIndex !== -1) {
       path = path.slice(0, qIndex);
     }
-    return `${this.serverUrl}/v1/linovelib/cover/path/${path}`;
+    const novelId = path.match(/\/(\d+)\/(\d+)\/(\d+)s\.(jpg|jpeg)/)?.[3];
+    return `${this.serverUrl}/v1/linovelib/cover/novel/${novelId}`;
   }
 
   async popularNovels(
