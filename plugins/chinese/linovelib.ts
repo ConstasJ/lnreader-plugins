@@ -1,22 +1,22 @@
-import { load as parseHTML } from 'cheerio';
 import { fetchText } from '@libs/fetch';
-import { FilterTypes, Filters } from '@libs/filterInputs';
-import { Plugin } from '@/types/plugin';
+import { type Filters, FilterTypes } from '@libs/filterInputs';
 import { storage } from '@libs/storage';
+import { load as parseHTML } from 'cheerio';
+import type { Plugin } from '@/types/plugin';
 
 class Linovelib implements Plugin.PluginBase {
   id = 'linovelib';
   name = 'Linovelib';
   icon = 'src/cn/linovelib/icon.png';
   site = 'https://www.bilinovel.com';
-  version = '1.2.1';
+  version = '1.2.2';
   imageRequestInit?: Plugin.ImageRequestInit | undefined = {
     method: 'GET',
     headers: {
       'User-Agent':
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36 Edg/144.0.0.0',
-      'Referer': 'https://www.linovelib.com',
-      'Accept':
+      Referer: 'https://www.linovelib.com',
+      Accept:
         'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
     },
   };
@@ -25,7 +25,7 @@ class Linovelib implements Plugin.PluginBase {
   pluginSettings = {
     host: {
       value: 'http://example.com',
-      label: 'Custom LDS Host',
+      label: 'Acanthis API Server Host',
       type: 'Text',
     },
   };
@@ -43,7 +43,8 @@ class Linovelib implements Plugin.PluginBase {
     if (qIndex !== -1) {
       path = path.slice(0, qIndex);
     }
-    return `${this.serverUrl}/api/cover${path}`;
+    const novelId = path.match(/\/(\d+)\/(\d+)\/(\d+)s\.(jpg|jpeg)/)?.[3];
+    return `${this.serverUrl}/v1/linovelib/cover/novel/${novelId}`;
   }
 
   async popularNovels(
@@ -58,7 +59,7 @@ class Linovelib implements Plugin.PluginBase {
 
     const body = await fetchText(url, {
       headers: new Headers({
-        'Accept':
+        Accept:
           'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
         'Accept-Encoding': 'gzip, deflate',
         'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
@@ -70,7 +71,7 @@ class Linovelib implements Plugin.PluginBase {
 
     const novels: Plugin.NovelItem[] = [];
 
-    loadedCheerio('.module-rank-booklist .book-layout').each((i, el) => {
+    loadedCheerio('.module-rank-booklist .book-layout').each((_i, el) => {
       const url = loadedCheerio(el).attr('href');
 
       const novelName = loadedCheerio(el).find('.book-title').text();
@@ -92,28 +93,28 @@ class Linovelib implements Plugin.PluginBase {
     return novels;
   }
 
-  async parseNovel(novelPath: string): Promise<Plugin.SourceNovel> {
+  async parseNovel(novelId: string): Promise<Plugin.SourceNovel> {
     // move major logic to LDS
     const res = await fetchText(
-      `${this.serverUrl}/api/novel?path=${novelPath}`,
+      `${this.serverUrl}/v1/linovelib/novel/${novelId}`,
     );
-    const novel = JSON.parse(res) as Plugin.SourceNovel;
+    const novel = JSON.parse(res).data as Plugin.SourceNovel;
     return novel;
   }
 
-  async parseChapter(chapterPath: string): Promise<string> {
+  async parseChapter(chapterId: string): Promise<string> {
     // move major logic to LDS
     const lastFetchChapterTime =
-      Number(storage.get('lastFetchChapterTime_' + chapterPath)) || 0;
+      Number(storage.get(`lastFetchChapterTime_${chapterId}`)) || 0;
     if (Date.now() - lastFetchChapterTime < 10000) {
-      return storage.get('chapterContent_' + chapterPath) || '';
+      return storage.get(`chapterContent_${chapterId}`) || '';
     }
     const res = await fetchText(
-      `${this.serverUrl}/api/chapter?path=${chapterPath}`,
+      `${this.serverUrl}/v1/linovelib/chapter/${chapterId}`,
     );
-    const resObj = JSON.parse(res);
-    storage.set('lastFetchChapterTime_' + chapterPath, Date.now());
-    storage.set('chapterContent_' + chapterPath, resObj.content);
+    const resObj = JSON.parse(res).data as { content: string };
+    storage.set(`lastFetchChapterTime_${chapterId}`, Date.now());
+    storage.set(`chapterContent_${chapterId}`, resObj.content);
     return resObj.content;
   }
 
@@ -123,15 +124,15 @@ class Linovelib implements Plugin.PluginBase {
   ): Promise<Plugin.NovelItem[]> {
     // move major logic to LDS
     const lastSearchTime =
-      Number(storage.get('lastSearchTime_' + this.id)) || 0;
+      Number(storage.get(`lastSearchTime_${this.id}`)) || 0;
     if (Date.now() - lastSearchTime < 5000) {
       return [];
     }
     const res = await fetchText(
-      `${this.serverUrl}/api/search?keyword=${encodeURIComponent(searchTerm)}`,
+      `${this.serverUrl}/v1/linovelib/search?keyword=${encodeURIComponent(searchTerm)}`,
     );
-    const novelsData = JSON.parse(res).results as Plugin.NovelItem[];
-    storage.set('lastSearchTime_' + this.id, Date.now());
+    const novelsData = JSON.parse(res).data as Plugin.NovelItem[];
+    storage.set(`lastSearchTime_${this.id}`, Date.now());
     return novelsData;
   }
 
