@@ -99,7 +99,7 @@ class Linovelib implements Plugin.PluginBase {
   async parseNovel(novelId: string): Promise<Plugin.SourceNovel> {
     // move major logic to LDS
     const res = await fetchText(
-      `${this.serverUrl}/v1/linovelib/novel/${novelId}`,
+      `${this.serverUrl}/v1/linovelib/novel/${novelId}?style=lnreader`,
     );
     const novel = JSON.parse(res).data as Plugin.SourceNovel;
     return novel;
@@ -132,7 +132,7 @@ class Linovelib implements Plugin.PluginBase {
       return [];
     }
     const res = await fetchText(
-      `${this.serverUrl}/v1/linovelib/search?keyword=${encodeURIComponent(searchTerm)}`,
+      `${this.serverUrl}/v1/linovelib/search?keyword=${encodeURIComponent(searchTerm)}&style=lnreader`,
     );
     const novelsData = JSON.parse(res).data as Plugin.NovelItem[];
     storage.set(`lastSearchTime_${this.id}`, Date.now());
