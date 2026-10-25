@@ -1,4 +1,5 @@
 import { CheerioAPI, load as parseHTML } from 'cheerio';
+import { Parser } from 'htmlparser2';
 import { Plugin } from '@/types/plugin';
 import { defaultCover } from '@libs/defaultCover';
 import { NovelStatus } from '@libs/novelStatus';
@@ -10,7 +11,47 @@ class FuckNovelpia implements Plugin.PluginBase {
   name = 'FuckNovelpia';
   icon = 'src/en/fucknovelpia/icon.png';
   site = 'https://fucknovelpia.com/';
-  version = '1.1.0';
+  version = '1.1.3';
+
+  sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  // The site intermittently swaps in anti-scrape pages (nginx 403, a custom
+  // "Blocked" 429 page, or a Cloudflare challenge) whose bodies contain no
+  // reader markup. Parsing those silently produced empty chapters/novel lists
+  // (issue #2540), so surface them as errors instead, and wait out the rate
+  // limiter once before giving up.
+  //
+  // Do not override User-Agent. fetchApi already sends the app's configured
+  // agent, the same one WebView uses when the reader solves Cloudflare.
+  // A hardcoded desktop agent does not match that cf_clearance cookie, so the
+  // site keeps answering 403 after the check succeeds (issue #2730).
+  async fetchHtml(url: string): Promise<string> {
+    let response = await fetchApi(url);
+    if (response.status === 429) {
+      // Its 429s usually omit Retry-After, and Number(null) is 0, so parse it
+      // explicitly to keep the fallback wait instead of retrying instantly.
+      const retryAfter = parseInt(
+        response.headers.get('Retry-After') || '',
+        10,
+      );
+      const waitMs = (isNaN(retryAfter) ? 2 : Math.min(retryAfter, 10)) * 1000;
+      await this.sleep(waitMs);
+      response = await fetchApi(url);
+    }
+    if (!response.ok) {
+      const status = response.status;
+      const message =
+        status === 403 || status === 503
+          ? `Cloudflare protection detected (HTTP ${status}). Open the plugin in WebView, complete the check, then try again.`
+          : `FuckNovelpia returned HTTP ${status}`;
+      const error = new Error(message) as Error & { status?: number };
+      error.status = status;
+      throw error;
+    }
+    return await response.text();
+  }
 
   // Returns false once the site has silently clamped us past the real last page.
   hasRequestedPage(cheerio: CheerioAPI, requestedPage: number): boolean {
@@ -49,6 +90,63 @@ class FuckNovelpia implements Plugin.PluginBase {
     return novels;
   }
 
+  async parseLatestUpdates() {
+    const link = this.site + 'updates.php';
+    const html = await this.fetchHtml(link);
+    const novels: Plugin.NovelItem[] = [];
+    let tempNovel: Partial<Plugin.NovelItem> = {};
+    const seen = new Set<string>();
+
+    const stateStack: ParsingState[] = [ParsingState.Idle];
+    const currentState = () => stateStack[stateStack.length - 1];
+    const pushState = (state: ParsingState) => stateStack.push(state);
+    const popState = () =>
+      stateStack.length > 1 ? stateStack.pop() : currentState();
+
+    const parser = new Parser({
+      onopentag: (name, attribs) => {
+        const state = currentState();
+        if (attribs.class === 'updates-list') {
+          pushState(ParsingState.NovelList);
+        }
+
+        if (state === ParsingState.Idle) return;
+
+        switch (name) {
+          case 'a':
+            if (seen.has(attribs.href)) return;
+            seen.add(attribs.href);
+            pushState(ParsingState.Novel);
+            tempNovel.path = attribs.href.substring(1);
+            break;
+          case 'img':
+            tempNovel.cover = attribs.src;
+            tempNovel.name = attribs.alt;
+            break;
+          case 'div':
+            switch (attribs.class) {
+              case 'copy':
+                if (tempNovel.name && tempNovel.path) {
+                  novels.push({ ...tempNovel } as Plugin.NovelItem);
+                  popState();
+                }
+                tempNovel = {};
+                break;
+              case 'install-banner':
+                popState();
+                break;
+            }
+            break;
+        }
+      },
+    });
+
+    parser.write(html);
+    parser.end();
+
+    return novels;
+  }
+
   async popularNovels(
     page: number,
     {
@@ -56,15 +154,14 @@ class FuckNovelpia implements Plugin.PluginBase {
       filters,
     }: Plugin.PopularNovelsOptions<typeof this.filters>,
   ): Promise<Plugin.NovelItem[]> {
+    if (showLatestNovels) {
+      return this.parseLatestUpdates();
+    }
+
     const params = new URLSearchParams();
 
     params.set('q', '');
-
-    if (showLatestNovels) {
-      params.set('sort', 'latest');
-    } else {
-      params.set('sort', filters.sort.value);
-    }
+    params.set('sort', filters.sort.value);
 
     // Search metadata filters (appears all the time)
     for (const key of [
@@ -110,8 +207,7 @@ class FuckNovelpia implements Plugin.PluginBase {
 
     const link = this.site + 'search.php?' + params.toString();
 
-    const result = await fetchApi(link);
-    const body = await result.text();
+    const body = await this.fetchHtml(link);
 
     const loadedCheerio = parseHTML(body);
 
@@ -120,8 +216,7 @@ class FuckNovelpia implements Plugin.PluginBase {
   }
 
   async parseNovel(novelPath: string): Promise<Plugin.SourceNovel> {
-    const result = await fetchApi(this.site + novelPath);
-    const body = await result.text();
+    const body = await this.fetchHtml(this.site + novelPath);
 
     const loadedCheerio = parseHTML(body);
 
@@ -209,14 +304,15 @@ class FuckNovelpia implements Plugin.PluginBase {
   }
 
   async parseChapter(chapterPath: string): Promise<string> {
-    const result = await fetchApi(this.site + chapterPath);
-    const body = await result.text();
+    const body = await this.fetchHtml(this.site + chapterPath);
     const $ = parseHTML(body);
 
     const chapter = $('.reader').first();
 
     if (!chapter.length) {
-      return '';
+      // A 200 without reader markup is a changed/blocked page, not an empty
+      // chapter — never report a false empty-success.
+      throw new Error('Chapter content not found in page');
     }
 
     // Remove things that aren't part of the chapter
@@ -253,8 +349,7 @@ class FuckNovelpia implements Plugin.PluginBase {
 
     const link = this.site + 'search.php?' + params.toString();
 
-    const result = await fetchApi(link);
-    const body = await result.text();
+    const body = await this.fetchHtml(link);
     const loadedCheerio = parseHTML(body);
 
     if (!this.hasRequestedPage(loadedCheerio, page)) return [];
@@ -672,3 +767,9 @@ class FuckNovelpia implements Plugin.PluginBase {
 }
 
 export default new FuckNovelpia();
+
+enum ParsingState {
+  Idle,
+  Novel,
+  NovelList,
+}

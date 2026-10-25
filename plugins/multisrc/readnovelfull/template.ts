@@ -25,6 +25,9 @@ type ReadNovelFullOptions = {
   noPages?: string[];
   pageAsPath?: boolean;
   customJs?: string;
+  chapterListPaginated?: boolean;
+  imageReferer?: boolean;
+  listClass?: string;
 };
 
 export type ReadNovelFullMetadata = {
@@ -43,6 +46,8 @@ export class ReadNovelFullPlugin implements Plugin.PluginBase {
   version: string;
   options: ReadNovelFullOptions;
   filters?: Filters | undefined;
+  imageRequestInit?: Plugin.ImageRequestInit;
+  private lastPage: { no: number; paths: string[] } | null = null;
 
   constructor(metadata: ReadNovelFullMetadata) {
     this.id = metadata.id;
@@ -50,9 +55,16 @@ export class ReadNovelFullPlugin implements Plugin.PluginBase {
     this.icon = `multisrc/readnovelfull/${metadata.id.toLowerCase()}/icon.png`;
     this.site = metadata.sourceSite;
     const versionIncrements = metadata.options?.versionIncrements || 0;
-    this.version = `2.2.${1 + versionIncrements}`;
+    this.version = `2.3.${3 + versionIncrements}`;
     this.options = metadata.options;
     this.filters = metadata.filters;
+    if (this.options?.imageReferer) {
+      this.imageRequestInit = {
+        headers: {
+          'Referer': this.site,
+        },
+      };
+    }
   }
 
   lastSearch: number | null = null;
@@ -67,6 +79,13 @@ export class ReadNovelFullPlugin implements Plugin.PluginBase {
     let tempNovel: Partial<Plugin.NovelItem> = {};
     let depth: number;
 
+    const { listClass } = this.options;
+    const isListStart = (cls?: string) => {
+      if (!cls) return false;
+      if (listClass) return cls.split(/\s+/).includes(listClass);
+      return cls.includes('archive') || cls === 'col-content'; // legacy behaviour
+    };
+
     const stateStack: ParsingState[] = [ParsingState.Idle];
     const currentState = () => stateStack[stateStack.length - 1];
     const pushState = (state: ParsingState) => stateStack.push(state);
@@ -77,8 +96,8 @@ export class ReadNovelFullPlugin implements Plugin.PluginBase {
       onopentag: (name, attribs) => {
         const state = currentState();
         if (
-          attribs.class?.includes('archive') ||
-          attribs.class === 'col-content'
+          isListStart(attribs.class) &&
+          (!listClass || state === ParsingState.Idle)
         ) {
           pushState(ParsingState.NovelList);
           depth = 0;
@@ -93,7 +112,12 @@ export class ReadNovelFullPlugin implements Plugin.PluginBase {
         switch (name) {
           case 'img':
             {
-              const cover = attribs['data-src'] || attribs.src;
+              const cover = [
+                attribs['data-src'],
+                attribs['data-cfsrc'],
+                attribs['data-original'],
+                attribs.src,
+              ].find(attr => attr && !attr.startsWith('data:'));
               if (cover) {
                 tempNovel.cover = new URL(cover, this.site).href;
               }
@@ -142,6 +166,135 @@ export class ReadNovelFullPlugin implements Plugin.PluginBase {
 
     return novels;
   }
+
+  // ===========================================================================
+  //                              HELPERS (chapter-list pagination)
+  // ===========================================================================
+
+  parseChapterListFragment(
+    html: string,
+    startIndex: number,
+  ): Plugin.ChapterItem[] {
+    const chapters: Plugin.ChapterItem[] = [];
+    let tempChapter: Partial<Plugin.ChapterItem> = {};
+    let i = startIndex;
+    let inChapter = false;
+
+    const parser = new Parser({
+      onopentag: (name, attribs) => {
+        if (name === 'a' && attribs.href) {
+          i++;
+          inChapter = true;
+          tempChapter.name = attribs.title || `Chapter ${i}`;
+          tempChapter.releaseTime = null;
+          tempChapter.chapterNumber = i;
+          tempChapter.path = attribs.href.startsWith('/')
+            ? attribs.href.substring(1)
+            : attribs.href;
+        }
+      },
+      onclosetag: name => {
+        if (name === 'a' && inChapter) {
+          if (tempChapter.name && tempChapter.path) {
+            chapters.push({ ...tempChapter } as Plugin.ChapterItem);
+          }
+          tempChapter = {};
+          inChapter = false;
+        }
+      },
+    });
+
+    parser.write(html);
+    parser.end();
+    return chapters;
+  }
+
+  async fetchAllChaptersViaJsonAjax(
+    novelPath: string,
+  ): Promise<Plugin.ChapterItem[]> {
+    const pageSize = 40;
+    const rateLimitState = { backoffUntil: 0 };
+
+    const first = await this.fetchChapterPageWithRetry(
+      novelPath,
+      1,
+      pageSize,
+      rateLimitState,
+    );
+    if (!first) {
+      return [];
+    }
+
+    const allChapters: Plugin.ChapterItem[] = [...first.chapters];
+    let fetchedPages = 1;
+
+    if (first.totalPages > 1) {
+      for (let page = 2; page <= first.totalPages; page++) {
+        const result = await this.fetchChapterPageWithRetry(
+          novelPath,
+          page,
+          pageSize,
+          rateLimitState,
+        );
+        if (result) {
+          allChapters.push(...result.chapters);
+          fetchedPages++;
+        }
+      }
+    }
+
+    return allChapters;
+  }
+
+  private async fetchChapterPageWithRetry(
+    novelPath: string,
+    page: number,
+    pageSize: number,
+    rateLimitState: { backoffUntil: number },
+  ): Promise<{ totalPages: number; chapters: Plugin.ChapterItem[] } | null> {
+    const url = `${this.site}${novelPath}?ajax=chapters&page=${page}&pageSize=${pageSize}`;
+    const maxAttempts = 3;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      // Wait out any rate-limit cooldown before sending.
+      const waitMs = rateLimitState.backoffUntil - Date.now();
+      if (waitMs > 0) {
+        await this.sleep(waitMs);
+      }
+
+      try {
+        const result = await fetchApi(url);
+        if (result.ok) {
+          const json = await result.json();
+          const chapters = this.parseChapterListFragment(
+            json.html || '',
+            (page - 1) * pageSize,
+          );
+          await this.sleep(150); // pacing delay — confirmed safe (zero 429s) across multiple runs/novels
+          return { totalPages: json.totalPage || 1, chapters };
+        }
+
+        if (result.status === 429) {
+          const retryAfterHeader = result.headers?.get?.('Retry-After');
+          const retryAfterMs = retryAfterHeader
+            ? Number(retryAfterHeader) * 1000
+            : 3000 * (attempt + 1); // fallback: 3s, 6s, 9s
+          const cooldownUntil = Date.now() + retryAfterMs;
+          // Only extend the cooldown, never shorten it
+          if (cooldownUntil > rateLimitState.backoffUntil) {
+            rateLimitState.backoffUntil = cooldownUntil;
+          }
+        } else {
+          await this.sleep(800 * (attempt + 1));
+        }
+      } catch (err) {
+        await this.sleep(800 * (attempt + 1));
+      }
+    }
+
+    return null;
+  }
+  // ============================================================================================
 
   async popularNovels(
     pageNo: number,
@@ -222,12 +375,34 @@ export class ReadNovelFullPlugin implements Plugin.PluginBase {
       );
     }
     const html = await result.text();
-    return this.parseNovels(html);
+    const novels = this.parseNovels(html);
+    const paths = novels.map(n => n.path);
+
+    // If the previous and current page share the same novel items then return []
+    const prev = this.lastPage;
+    if (
+      prev &&
+      pageNo > prev.no &&
+      prev.paths.length === paths.length &&
+      prev.paths.every((p, i) => p === paths[i])
+    ) {
+      return [];
+    }
+
+    this.lastPage = { no: pageNo, paths };
+    return novels;
   }
 
   async parseNovel(novelPath: string): Promise<Plugin.SourceNovel> {
     const url = this.site + novelPath;
     const result = await fetchApi(url);
+    if (!result.ok) {
+      throw new Error(
+        result.status === 404
+          ? 'Novel not found (404), it may have been removed from this source.'
+          : `Could not reach site (${result.status}: ${result.statusText}) try to open in webview.`,
+      );
+    }
     const body = await result.text();
 
     const novel: Partial<Plugin.SourceNovel> = {
@@ -277,12 +452,20 @@ export class ReadNovelFullPlugin implements Plugin.PluginBase {
             if (!this.options.noAjax && attribs.id === 'rating') {
               novelId = attribs['data-novel-id'];
             }
+            if (attribs.id === 'indexListPage') {
+              novelId = attribs['data-novel-id'];
+              totalChapter = Number(attribs['data-total-chapters']);
+            }
             if (state === ParsingState.Info) depth++;
             break;
           case 'img':
             if (state === ParsingState.Cover) {
-              const cover =
-                attribs.src ?? attribs['data-cfsrc'] ?? attribs['data-src'];
+              const cover = [
+                attribs['data-src'],
+                attribs['data-cfsrc'],
+                attribs['data-original'],
+                attribs.src,
+              ].find(attr => attr && !attr.startsWith('data:'));
               const name = attribs.title;
               if (cover) {
                 novel.cover = new URL(cover, this.site).href;
@@ -438,50 +621,91 @@ export class ReadNovelFullPlugin implements Plugin.PluginBase {
 
       onend: () => {
         if (infoParts.length) {
-          infoParts
-            .join('')
-            .split('\n')
-            .map(line => line.trim())
-            .filter(line => line.includes(':'))
-            .forEach(line => {
-              const parts = line.split(':');
-              const detailName = parts[0].trim().toLowerCase();
-              const detail = parts[1]
+          // Split into lines by the '\n' tokens, keeping each line's
+          // text nodes separate: joining them first would glue
+          // multi-element values (e.g. genre chips) into one blob.
+          const lines: string[][] = [];
+          let currentLine: string[] = [];
+          for (const part of infoParts) {
+            if (part === '\n') {
+              lines.push(currentLine);
+              currentLine = [];
+            } else {
+              currentLine.push(part);
+            }
+          }
+          if (currentLine.length) lines.push(currentLine);
+
+          lines.forEach(tokens => {
+            const line = tokens.join('').trim();
+            if (!line.includes(':')) return;
+            const colonIdx = line.indexOf(':');
+            const detailName = line.slice(0, colonIdx).trim().toLowerCase();
+            const rest = line.slice(colonIdx + 1);
+
+            let detail: string;
+            if (detailName === 'genre') {
+              // Genre chips arrive as separate text nodes; keep them
+              // as separate items instead of gluing them together.
+              const labelIdx = tokens.findIndex(t => t.includes(':'));
+              const labelToken = tokens[labelIdx] ?? '';
+              const labelRest = labelToken
+                .slice(labelToken.indexOf(':') + 1)
+                .trim();
+              const items = [
+                ...(labelRest
+                  ? labelRest
+                      .split(',')
+                      .map(g => g.trim())
+                      .filter(Boolean)
+                  : []),
+                ...tokens
+                  .slice(labelIdx + 1)
+                  .map(t => t.trim())
+                  .filter(Boolean),
+              ];
+              detail = items.join(', ');
+            } else {
+              detail = rest
                 .split(',')
                 .map(g => g.trim())
                 .join(', ');
+            }
 
-              switch (detailName) {
-                case 'author':
-                  novel.author = detail;
-                  break;
-                case 'genre':
-                  novel.genres = detail;
-                  break;
-                case 'status':
-                  {
-                    const map: Record<string, string> = {
-                      ongoing: NovelStatus.Ongoing,
-                      hiatus: NovelStatus.OnHiatus,
-                      dropped: NovelStatus.Cancelled,
-                      cancelled: NovelStatus.Cancelled,
-                      completed: NovelStatus.Completed,
-                    };
-                    novel.status =
-                      map[detail.toLowerCase()] ?? NovelStatus.Unknown;
-                  }
-                  break;
-                default:
-                  return;
-              }
-            });
+            switch (detailName) {
+              case 'author':
+                novel.author = detail;
+                break;
+              case 'genre':
+                novel.genres = detail;
+                break;
+              case 'status':
+                {
+                  const map: Record<string, string> = {
+                    ongoing: NovelStatus.Ongoing,
+                    hiatus: NovelStatus.OnHiatus,
+                    dropped: NovelStatus.Cancelled,
+                    cancelled: NovelStatus.Cancelled,
+                    completed: NovelStatus.Completed,
+                  };
+                  novel.status =
+                    map[detail.toLowerCase()] ?? NovelStatus.Unknown;
+                }
+                break;
+              default:
+                return;
+            }
+          });
 
           if (!novelId) {
             const idMatch = novelPath.match(/\d+/);
             novelId = idMatch ? idMatch[0] : null;
           }
         } else {
-          novel.genres = genreArray.join('').trim();
+          novel.genres = genreArray
+            .map(g => g.trim())
+            .filter(Boolean)
+            .join(', ');
           novel.author = authorParts.join('').trim();
           novel.status = statusParts
             .join('')
@@ -495,7 +719,9 @@ export class ReadNovelFullPlugin implements Plugin.PluginBase {
     parser.write(body);
     parser.end();
 
-    if (this.options.noAjax && chapters.length > 0 && !totalChapter) {
+    if (this.options.chapterListPaginated) {
+      novel.chapters = await this.fetchAllChaptersViaJsonAjax(novelPath);
+    } else if (this.options.noAjax && chapters.length > 0 && !totalChapter) {
       novel.chapters = chapters;
     } else if (novelId !== null) {
       const chapterListing =
@@ -513,11 +739,15 @@ export class ReadNovelFullPlugin implements Plugin.PluginBase {
         fetchOptions = {
           method: 'POST',
           body: params.toString(),
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'X-Requested-With': 'XMLHttpRequest',
+          },
         };
       } else {
         chaptersUrl = `${this.site}${chapterListing}?${params.toString()}`;
       }
+
       const ajaxResult = await fetchApi(chaptersUrl, fetchOptions);
       if (!ajaxResult.ok) {
         console.error(`Failed to fetch chapters: ${ajaxResult.status}`);
@@ -552,8 +782,10 @@ export class ReadNovelFullPlugin implements Plugin.PluginBase {
             }
 
             if (chapterHref !== undefined) {
-              const href = new URL(chapterHref, this.site);
-              tempAjaxChapter.path = href.pathname.substring(1);
+              const path = new URL(chapterHref, this.site).pathname.substring(
+                1,
+              );
+              tempAjaxChapter.path = path;
               tempAjaxChapter.name = initialName;
             }
           },
@@ -598,6 +830,13 @@ export class ReadNovelFullPlugin implements Plugin.PluginBase {
 
   async parseChapter(chapterPath: string): Promise<string> {
     const response = await fetchApi(this.site + chapterPath);
+    if (!response.ok) {
+      throw new Error(
+        response.status === 404
+          ? 'Chapter not found (404), it may have been removed from this source.'
+          : `Could not reach site (${response.status}: ${response.statusText}) try to open in webview.`,
+      );
+    }
     let html = await response.text();
     if (this.options?.customJs) {
       try {
@@ -628,7 +867,7 @@ export class ReadNovelFullPlugin implements Plugin.PluginBase {
       '>': '&gt;',
       '"': '&quot;',
       "'": '&#39;',
-      ' ': '&nbsp;',
+      ' ': '&nbsp;',
       '\u200C': '', // this is probably a breaking change, report if paragraphs look weird
     };
     const escapeHtml = (text: string) =>
@@ -787,6 +1026,9 @@ export class ReadNovelFullPlugin implements Plugin.PluginBase {
 
     const result = await fetchApi(url, fetchOptions);
     this.lastSearch = Date.now();
+
+    // Some sites (e.g. novelfull.com) return 404 for pages past the last one
+    if (result.status === 404 && page > 1) return [];
 
     if (!result.ok) {
       throw new Error(
