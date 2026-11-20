@@ -2,6 +2,43 @@
 
 import { parse as parseProto } from 'protobufjs';
 
+export type WebviewFetchOptions = {
+  waitForSelector?: string;
+  timeoutMs?: number;
+  settleMs?: number;
+};
+
+export type WebviewFetchResult = {
+  ok: boolean;
+  html: string;
+};
+
+export async function fetchViaWebview(
+  url: string,
+  options?: WebviewFetchOptions,
+): Promise<WebviewFetchResult> {
+  if (typeof window === 'undefined') {
+    return { ok: false, html: '' };
+  }
+  try {
+    const res = await fetch(`${window.location.origin}/webview-fetch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, ...options }),
+    });
+    if (!res.ok) {
+      return { ok: false, html: '' };
+    }
+    const data = (await res.json()) as Partial<WebviewFetchResult>;
+    return {
+      ok: Boolean(data.ok && data.html),
+      html: data.html || '',
+    };
+  } catch {
+    return { ok: false, html: '' };
+  }
+}
+
 export type FetchInit = {
   headers?: Record<string, string | undefined> | Headers;
   method?: string;
@@ -21,6 +58,12 @@ const makeInit = async (init?: FetchInit) => {
     'Accept-Language': '*',
     'Sec-Fetch-Mode': 'cors',
     'Accept-Encoding': 'gzip, deflate',
+    ...(typeof window === 'undefined'
+      ? {
+          'User-Agent':
+            'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36',
+        }
+      : {}),
   };
   if (init?.headers) {
     if (init.headers instanceof Headers) {

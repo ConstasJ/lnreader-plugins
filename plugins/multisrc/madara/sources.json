@@ -76,6 +76,8 @@
     "sourceName": "MeioNovel",
     "options": {
       "useNewChapterEndpoint": true,
+      "versionIncrements": 1,
+      "customJs": "chapterText.find('p').each((_, p) => { const el = loadedCheerio(p); if (!el.find('br').length) return; const lines = (el.html() || '').split(/<br\\s*\\/?>/i).map(l => l.replace(/\\uFEFF/g, '').trim()).filter(l => l.replace(/&nbsp;|\\u00A0/g, '').trim()); el.replaceWith(lines.map(l => '<p>' + l + '</p>').join('')); });",
       "lang": "Indonesian"
     }
   },
@@ -283,15 +285,6 @@
     "sourceName": "Fans Translations",
     "options": {
       "useNewChapterEndpoint": true
-    }
-  },
-  {
-    "id": "worldnovel",
-    "sourceSite": "https://world-novel.fr/",
-    "sourceName": "WorldNovel",
-    "options": {
-      "useNewChapterEndpoint": true,
-      "lang": "French"
     }
   },
   {
@@ -666,14 +659,6 @@
     "sourceName": "Tangerine Archive",
     "options": {
       "lang": "English",
-      "useNewChapterEndpoint": true
-    }
-  },
-  {
-    "id": "bailiantales",
-    "sourceSite": "https://bailiantales.com/",
-    "sourceName": "BaiLianTales",
-    "options": {
       "useNewChapterEndpoint": true
     }
   },

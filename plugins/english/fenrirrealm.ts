@@ -1,4 +1,5 @@
-import { fetchApi } from '@libs/fetch';
+import * as fetchLib from '@libs/fetch';
+const { fetchApi } = fetchLib;
 import { Plugin } from '@/types/plugin';
 import { load as loadCheerio } from 'cheerio';
 import { Filters, FilterTypes } from '@libs/filterInputs';
@@ -168,6 +169,18 @@ function decodeBase64Bytes(b64: string): Uint8Array {
   return bytes;
 }
 
+const INVISIBLE_CHARS_REGEX =
+  // eslint-disable-next-line no-misleading-character-class
+  /[\u200B-\u200D\uFEFF\u200E\u200F\u202A-\u202E\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}]/gu;
+
+function stripInvisibleChars(text: string): string {
+  return text.replace(INVISIBLE_CHARS_REGEX, '');
+}
+
+function normalizeSlugPath(path: string): string {
+  return path.replace(/^([^/]+)\/([^/]+)\/\2\//, '$1/$2/');
+}
+
 type ReadTokenPayload = {
   vid: string;
   cid: number | null;
@@ -212,7 +225,7 @@ type APINovel = {
 };
 
 type APIChapter = {
-  id: number;
+  id?: number;
   uuid?: string | null;
   locked: { price: number } | null;
   group: null | {
@@ -226,13 +239,14 @@ type APIChapter = {
 };
 
 type APIChapterData = {
-  id: number;
+  id?: number;
   uuid?: string | null;
   slug?: string;
   name?: string;
   content: string | string[];
   content_format?: 'locked' | 'encrypted' | 'html' | 'text' | 'json' | null;
   content_scheme?: 'fragmented-v2' | 'fragmented-v1' | string | null;
+  content_cid?: number | null;
   remint_chapter_id?: number | null;
   remint_chapter_uuid?: string | null;
   locked?: {
@@ -293,15 +307,19 @@ type Nodes = {
   }[];
 };
 
+const readerParagraphSelector =
+  '[id^="reader-area-"] p, .reader-area.touch-manipulation p, div.content-area p';
+
 class FenrirRealmPlugin implements Plugin.PluginBase {
   id = 'fenrir';
   name = 'Fenrir Realm';
   icon = 'src/en/fenrirrealm/icon.png';
   site = 'https://fenrirealm.com';
-  version = '1.1.4';
+  version = '1.2.0';
   imageRequestInit?: Plugin.ImageRequestInit | undefined = undefined;
 
   private cachedReadToken: CachedReadToken | null = null;
+  private lastMintRefusal: Response | null = null;
 
   hideLocked = storage.get('hideLocked');
   pluginSettings = {
@@ -405,6 +423,7 @@ class FenrirRealmPlugin implements Plugin.PluginBase {
     chapterTarget?: string | number | null,
     cid?: number | null,
   ): Promise<boolean> {
+    this.lastMintRefusal = null;
     try {
       const payload: Record<string, string> = {};
       if (
@@ -427,7 +446,10 @@ class FenrirRealmPlugin implements Plugin.PluginBase {
           headers,
           body: JSON.stringify(payload),
         });
-        if (!res.ok) return null;
+        if (!res.ok) {
+          this.lastMintRefusal = res;
+          return null;
+        }
         const data = await res.json();
         return data?.active &&
           typeof data.token === 'string' &&
@@ -443,6 +465,7 @@ class FenrirRealmPlugin implements Plugin.PluginBase {
         data = await requestMint(null);
       }
       if (data) {
+        this.lastMintRefusal = null;
         const numericId =
           typeof cid === 'number' && cid > 0
             ? cid
@@ -457,6 +480,19 @@ class FenrirRealmPlugin implements Plugin.PluginBase {
     } catch {
       return false;
     }
+  }
+
+  private verifyInWebViewError(refusal?: Response | null): Error {
+    const error: Error & { status?: number; response?: Response } = new Error(
+      'Chapter is protected by Cloudflare Turnstile. Please open this chapter in WebView to verify and try again.',
+    );
+    if (refusal && !refusal.ok) {
+      error.status = refusal.status;
+      error.response = refusal;
+    } else {
+      error.status = 403;
+    }
+    return error;
   }
 
   private async getReadToken(
@@ -492,6 +528,16 @@ class FenrirRealmPlugin implements Plugin.PluginBase {
     }
   }
 
+  private getChapterCid(data: APIChapterData): number | null {
+    if (typeof data.content_cid === 'number' && data.content_cid > 0) {
+      return data.content_cid;
+    }
+    if (typeof data.id === 'number' && data.id > 0) {
+      return data.id;
+    }
+    return null;
+  }
+
   private decryptWithToken(
     chapterData: APIChapterData,
     token: string,
@@ -499,12 +545,17 @@ class FenrirRealmPlugin implements Plugin.PluginBase {
     try {
       const isV2 = chapterData.content_scheme === 'fragmented-v2';
       const vid = isV2 ? extractVidFromReadToken(token) : '';
+      const cid = this.getChapterCid(chapterData);
+      const saltTarget =
+        cid !== null && cid !== undefined
+          ? cid
+          : chapterData.uuid || chapterData.id || '';
       const b64Cipher = Array.isArray(chapterData.content)
         ? unshuffleFragments(
             chapterData.content,
             isV2
-              ? `${token}:${vid}:${chapterData.id}:${FRAG_SALT_V2}`
-              : `${token}:${chapterData.id}:${FRAG_SALT_V1}`,
+              ? `${token}:${vid}:${saltTarget}:${FRAG_SALT_V2}`
+              : `${token}:${saltTarget}:${FRAG_SALT_V1}`,
           )
         : typeof chapterData.content === 'string'
           ? chapterData.content
@@ -516,8 +567,8 @@ class FenrirRealmPlugin implements Plugin.PluginBase {
 
       const keySeed =
         isV2 && vid !== ''
-          ? `${token}:${vid}:${chapterData.id}:${CONTENT_SALT_V2}`
-          : `${token}:${chapterData.id}:${CONTENT_SALT_V1}`;
+          ? `${token}:${vid}:${saltTarget}:${CONTENT_SALT_V2}`
+          : `${token}:${saltTarget}:${CONTENT_SALT_V1}`;
       const keyBytes = sha256Bytes(keySeed);
       const iv = raw.slice(0, AES_GCM_IV_LENGTH);
       const ciphertextWithTag = raw.slice(AES_GCM_IV_LENGTH);
@@ -536,7 +587,7 @@ class FenrirRealmPlugin implements Plugin.PluginBase {
         parsedContent.type === 'doc' ||
         parsedContent.type === 'systemWindow'
       ) {
-        return parsedContent.content
+        const rendered = parsedContent.content
           .map(node => {
             if (node.type === 'paragraph') {
               const innerHtml =
@@ -571,8 +622,8 @@ class FenrirRealmPlugin implements Plugin.PluginBase {
             }
             return '';
           })
-          .join('\n')
-          .replace(/[\u200B-\u200D\uFEFF]/g, '');
+          .join('\n');
+        return stripInvisibleChars(rendered);
       }
     } catch {
       // Fall through to HTML cleaner
@@ -601,7 +652,7 @@ class FenrirRealmPlugin implements Plugin.PluginBase {
     });
 
     const cleanedHtml = $.html() || content;
-    return cleanedHtml.replace(/[\u200B-\u200D\uFEFF]/g, '');
+    return stripInvisibleChars(cleanedHtml);
   }
 
   async popularNovels(
@@ -623,13 +674,20 @@ class FenrirRealmPlugin implements Plugin.PluginBase {
 
     const res = await fetchApi(
       `${this.site}/api/new/v2/series?${params.toString()}`,
-    ).then(r =>
-      r.json().catch(() => {
-        throw new Error(
-          'There was an error fetching the data from the server. Please try to open it in WebView',
-        );
-      }),
-    );
+    ).then(async r => {
+      const error: Error & { status?: number } = new Error(
+        'There was an error fetching the data from the server. Please try to open it in WebView',
+      );
+      // Keep the real HTTP status so a block page is distinguishable from a
+      // parsing failure.
+      if (!r.ok) {
+        error.status = r.status;
+        throw error;
+      }
+      return r.json().catch(() => {
+        throw error;
+      });
+    });
 
     return (res.data || []).map((r: APINovel) => this.parseNovelFromApi(r));
   }
@@ -703,44 +761,156 @@ class FenrirRealmPlugin implements Plugin.PluginBase {
     }
 
     novel.chapters = chapters
-      .map((c: APIChapter) => ({
-        name:
-          (c.locked?.price ? '🔒 ' : '') +
-          (c.group?.index == null ? '' : 'Vol ' + c.group?.index + ' ') +
-          'Chapter ' +
-          c.number +
-          (c.title && c.title.trim() != 'Chapter ' + c.number
-            ? ' - ' + c.title.replace(/^chapter [0-9]+ . /i, '')
-            : ''),
-        path:
+      .map((c: APIChapter) => {
+        const rawPath =
           cleanNovelPath +
           (c.group?.index == null ? '' : '/' + c.group?.slug) +
           '/' +
-          (c.slug || 'chapter-' + c.number) +
-          '~~' +
-          c.id,
-        releaseTime: c.created_at,
-        chapterNumber: c.number + (c.group?.index || 0) * 10000,
-      }))
+          (c.slug || 'chapter-' + c.number);
+        const resolvedPath = normalizeSlugPath(rawPath);
+        const chapterTarget = c.uuid || c.id;
+        return {
+          name:
+            (c.locked?.price ? '🔒 ' : '') +
+            (c.group?.index == null ? '' : 'Vol ' + c.group?.index + ' ') +
+            'Chapter ' +
+            c.number +
+            (c.title && c.title.trim() != 'Chapter ' + c.number
+              ? ' - ' + c.title.replace(/^chapter [0-9]+ . /i, '')
+              : ''),
+          path: resolvedPath + (chapterTarget ? `~~${chapterTarget}` : ''),
+          releaseTime: c.created_at,
+          chapterNumber: c.number + (c.group?.index || 0) * 10000,
+        };
+      })
       .sort(
         (a: ChapterInfo, b: ChapterInfo) => a.chapterNumber - b.chapterNumber,
       );
     return novel;
   }
 
+  private extractChapterHtml(body: string): string {
+    if (/confirm you['’]re human to continue reading/i.test(body)) {
+      return '';
+    }
+
+    const loadedCheerio = loadCheerio(body);
+
+    // Clean up anti-scraping and watermark elements first
+    loadedCheerio('[aria-hidden="true"]').remove();
+    loadedCheerio('.reader-attribution').remove();
+    loadedCheerio('[data-fr-attr]').remove();
+
+    const chapterText = loadedCheerio(readerParagraphSelector)
+      .map((_, el) => {
+        const html = loadedCheerio(el).html()?.trim();
+        return html ? `<p>${html}</p>` : '';
+      })
+      .get()
+      .filter(Boolean)
+      .join('\n');
+
+    if (!chapterText) {
+      return '';
+    }
+    return stripInvisibleChars(chapterText);
+  }
+
+  private async fetchChapterViaWebview(
+    chapterPath: string,
+  ): Promise<string | null> {
+    const fetchViaWebview = (
+      fetchLib as {
+        fetchViaWebview?: (
+          url: string,
+          options?: {
+            waitForSelector?: string;
+            timeoutMs?: number;
+            settleMs?: number;
+          },
+        ) => Promise<{ ok: boolean; html: string }>;
+      }
+    ).fetchViaWebview;
+    if (typeof fetchViaWebview !== 'function') {
+      return null;
+    }
+    try {
+      const res = await fetchViaWebview(this.resolveUrl(chapterPath), {
+        waitForSelector: readerParagraphSelector,
+        timeoutMs: 15000,
+        settleMs: 400,
+      });
+      if (!res?.ok || !res.html) {
+        return null;
+      }
+      const extracted = this.extractChapterHtml(res.html);
+      return extracted || null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async fetchViaWebviewOrThrow(
+    chapterPath: string,
+    res: Response | null,
+  ): Promise<string> {
+    const webviewContent = await this.fetchChapterViaWebview(chapterPath);
+    if (webviewContent) {
+      return webviewContent;
+    }
+    throw this.verifyInWebViewError(res);
+  }
+
   async parseChapter(chapterPath: string): Promise<string> {
-    const [slugPath, chapterId] = chapterPath.split('~~');
-    const apiUrl = chapterId
+    const [rawSlugPath, rawChapterId] = chapterPath.split('~~');
+    const slugPath = normalizeSlugPath(rawSlugPath);
+    const chapterId =
+      rawChapterId && rawChapterId !== 'undefined' ? rawChapterId : undefined;
+    this.lastMintRefusal = null;
+    let apiUrl = chapterId
       ? `${this.site}/api/new/v2/chapters/${chapterId}`
       : `${this.site}/api/new/v2/series/${slugPath}`;
-    const parsedCid = chapterId ? parseInt(chapterId, 10) : NaN;
-    const initialCid = Number.isFinite(parsedCid) ? parsedCid : null;
+    const initialCid =
+      chapterId && /^\d+$/.test(chapterId) ? parseInt(chapterId, 10) : null;
 
     if (this.getCachedReadToken(initialCid) === null) {
       await this.mintReadToken(chapterId || null, initialCid);
     }
 
     let res = await fetchApi(apiUrl, { headers: this.buildChapterHeaders() });
+
+    if (!res.ok && res.status === 404) {
+      const novelSlug = slugPath.split('/')[0];
+      try {
+        const chaptersRes = await fetchApi(
+          `${this.site}/api/new/v2/series/${novelSlug}/chapters`,
+        );
+        if (chaptersRes.ok) {
+          const list: APIChapter[] = await chaptersRes.json();
+          const targetSlug = slugPath.split('/').slice(1).join('/');
+          const matched = list.find(c => {
+            const chSlug = c.slug || `chapter-${c.number}`;
+            return (
+              (c.uuid && c.uuid === chapterId) ||
+              (c.id && String(c.id) === chapterId) ||
+              chSlug === targetSlug ||
+              (c.group?.slug ? `${c.group.slug}/${chSlug}` : chSlug) ===
+                targetSlug ||
+              chSlug === slugPath
+            );
+          });
+          const targetId = matched?.uuid || matched?.id;
+          if (targetId) {
+            apiUrl = `${this.site}/api/new/v2/chapters/${targetId}`;
+            res = await fetchApi(apiUrl, {
+              headers: this.buildChapterHeaders(),
+            });
+          }
+        }
+      } catch {
+        // Fall back to original res
+      }
+    }
 
     if (res.status === 429) {
       throw new Error(
@@ -761,11 +931,22 @@ class FenrirRealmPlugin implements Plugin.PluginBase {
         }
         this.captureReadTokenHeader(res, initialCid);
       }
+      if (!res.ok && res.status === 403) {
+        return this.fetchViaWebviewOrThrow(
+          chapterPath,
+          this.lastMintRefusal?.status === 403 ? this.lastMintRefusal : res,
+        );
+      }
+    }
+
+    if (res.status === 401 || res.status === 503) {
+      return this.fetchViaWebviewOrThrow(chapterPath, res);
     }
 
     if (res.ok) {
       let json: APIChapterData = await res.json();
-      this.captureReadTokenHeader(res, json.id);
+      const chapterCid = this.getChapterCid(json);
+      this.captureReadTokenHeader(res, chapterCid);
 
       if (json.content_format === 'locked') {
         if (
@@ -780,7 +961,8 @@ class FenrirRealmPlugin implements Plugin.PluginBase {
         }
 
         const remintTarget = this.resolveRemintTarget(json, chapterId);
-        const remintCid = json.remint_chapter_id || json.id || initialCid;
+        const remintCid =
+          this.getChapterCid(json) || json.remint_chapter_id || initialCid;
 
         const minted = await this.mintReadToken(remintTarget, remintCid);
         if (minted) {
@@ -794,18 +976,20 @@ class FenrirRealmPlugin implements Plugin.PluginBase {
           }
           if (retryRes.ok) {
             json = await retryRes.json();
-            this.captureReadTokenHeader(retryRes, json.id);
+            const retryCid = this.getChapterCid(json);
+            this.captureReadTokenHeader(retryRes, retryCid);
           }
         }
       }
 
       if (json.content_format === 'encrypted') {
-        const token = await this.getReadToken(json.id);
+        const tokenCid = this.getChapterCid(json);
+        const token = await this.getReadToken(tokenCid);
         let decrypted = token ? this.decryptWithToken(json, token) : null;
 
         if (!decrypted) {
           const remintTarget = this.resolveRemintTarget(json, chapterId);
-          if (await this.mintReadToken(remintTarget, json.id)) {
+          if (await this.mintReadToken(remintTarget, tokenCid)) {
             const retryRes = await fetchApi(apiUrl, {
               headers: this.buildChapterHeaders(),
             });
@@ -816,9 +1000,10 @@ class FenrirRealmPlugin implements Plugin.PluginBase {
             }
             if (retryRes.ok) {
               const retryJson: APIChapterData = await retryRes.json();
-              this.captureReadTokenHeader(retryRes, retryJson.id);
+              const retryCid = this.getChapterCid(retryJson);
+              this.captureReadTokenHeader(retryRes, retryCid);
               if (retryJson.content_format === 'encrypted') {
-                const freshToken = await this.getReadToken(retryJson.id);
+                const freshToken = await this.getReadToken(retryCid);
                 decrypted = freshToken
                   ? this.decryptWithToken(retryJson, freshToken)
                   : null;
@@ -841,9 +1026,7 @@ class FenrirRealmPlugin implements Plugin.PluginBase {
 
       if (json.content_format === 'locked') {
         this.cachedReadToken = null;
-        throw new Error(
-          'Chapter is protected by Cloudflare Turnstile. Please open this chapter in WebView to verify and try again.',
-        );
+        return this.fetchViaWebviewOrThrow(chapterPath, this.lastMintRefusal);
       }
 
       if (typeof json.content === 'string' && json.content) {
@@ -852,36 +1035,23 @@ class FenrirRealmPlugin implements Plugin.PluginBase {
     }
 
     // Fallback or old method
-    const url = `${this.site}/series/${slugPath}`;
+    const url = this.resolveUrl(chapterPath);
     const result = await fetchApi(url);
     const body = await result.text();
 
-    const loadedCheerio = loadCheerio(body);
-
-    // Clean up anti-scraping and watermark elements first
-    loadedCheerio('[aria-hidden="true"]').remove();
-    loadedCheerio('.reader-attribution').remove();
-    loadedCheerio('[data-fr-attr]').remove();
-
-    const chapterText = loadedCheerio(
-      '.reader-area p, div.content-area p, [id^="reader-area"] p',
-    )
-      .map((_, el) => {
-        const html = loadedCheerio(el).html()?.trim();
-        return html ? `<p>${html}</p>` : '';
-      })
-      .get()
-      .filter(Boolean)
-      .join('\n')
-      .replace(/[\u200B-\u200D\uFEFF]/g, '');
-
+    const chapterText = this.extractChapterHtml(body);
     if (chapterText) {
       return chapterText;
     }
 
+    const webviewContent = await this.fetchChapterViaWebview(chapterPath);
+    if (webviewContent) {
+      return webviewContent;
+    }
+
     // Fallback to SvelteKit JSON if HTML parsing fails or is empty
     try {
-      const jsonUrl = `${this.site}/series/${slugPath}/__data.json?x-sveltekit-invalidated=001`;
+      const jsonUrl = `${this.resolveUrl(chapterPath)}/__data.json?x-sveltekit-invalidated=001`;
       const jsonRes = await fetchApi(jsonUrl);
       const json: Nodes = await jsonRes.json();
 
@@ -900,7 +1070,7 @@ class FenrirRealmPlugin implements Plugin.PluginBase {
       // ignore
     }
 
-    return chapterText;
+    throw this.verifyInWebViewError(this.lastMintRefusal);
   }
 
   async searchNovels(
@@ -940,7 +1110,8 @@ class FenrirRealmPlugin implements Plugin.PluginBase {
   }
 
   resolveUrl(path: string): string {
-    return `${this.site}/series/${path.split('~~')[0]}`;
+    const chapterPath = normalizeSlugPath(path.split('~~')[0]);
+    return `${this.site}/series/${chapterPath}`;
   }
 
   filters = {
